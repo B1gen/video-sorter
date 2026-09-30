@@ -1,0 +1,77 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller pillow pytest
+
+      - name: Unit tests
+        run: python -m pytest -q tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Build folder version
+        run: python packaging/build.py --zip
+
+      - name: Build single-file exe
+        run: python packaging/build.py --onefile
+
+      - name: Self-test packaged exes
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($exe in @("dist\VideoSorter\VideoSorter.exe", "dist\VideoSorter.exe")) {
+            $report = Join-Path $env:RUNNER_TEMP ("report-" + [guid]::NewGuid() + ".txt")
+            $process = Start-Process -FilePath $exe -ArgumentList "--self-test", "`"$report`"" -Wait -PassThru
+            Write-Host "== $exe (exit $($process.ExitCode))"
+            if (Test-Path $report) { Get-Content $report -Encoding utf8 } else { Write-Host "no report written" }
+            if ($process.ExitCode -ne 0) { $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: VideoSorter-windows
+          path: |
+            dist/VideoSorter.exe
+            dist/VideoSorter-*-windows.zip
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = python -c "import video_sorter; print(video_sorter.__version__)"
+          $tag = "v$version"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --target $env:GITHUB_SHA --title "视频分类器 $version" --notes-file packaging/release_notes.md
+          }
+          gh release upload $tag dist/VideoSorter.exe "dist/VideoSorter-$version-windows.zip" --clobber
