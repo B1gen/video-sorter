@@ -105,6 +105,10 @@ class _ProbeTask(QRunnable):
             cached = self._cache.load(self._path)
             if cached is not None:
                 info, image = cached
+                if _audio_incomplete(info):
+                    probe_module.fill_audio(info)
+                    if info.audio_silent is not None or info.has_audio is False:
+                        self._cache.store(info, image)
                 if not self._cancel.is_set():
                     self._signals.ready.emit(info, image)
                 return
@@ -220,6 +224,16 @@ class ScanController(QObject):
         if self._running and self._walk_complete and self._done >= self._total:
             self._running = False
             self.scanFinished.emit(True)
+
+
+def _audio_incomplete(info: VideoInfo) -> bool:
+    """缓存是在没法测音量的环境下写的（比如当时没装 PyAV / ffmpeg），现在能测了就补上。"""
+    return (
+        not info.error
+        and info.has_audio is not False
+        and info.audio_silent is None
+        and probe_module.can_measure_silence()
+    )
 
 
 def _is_video(path: Path) -> bool:

@@ -57,6 +57,7 @@ UNKNOWN_FPS = "未知帧率"
 UNKNOWN_RESOLUTION = "未知分辨率"
 
 AUDIO_PRESENT = "有声音"
+AUDIO_UNMEASURED = "有音轨（未测音量）"
 AUDIO_SILENT = "无声音（音轨是静音）"
 AUDIO_NONE = "无声音（没有音轨）"
 AUDIO_UNKNOWN = "声音未知"
@@ -118,6 +119,8 @@ def audio_label(has_audio: Optional[bool], silent: Optional[bool]) -> Tuple[str,
         return AUDIO_UNKNOWN, UNKNOWN_RANK
     if not has_audio:
         return AUDIO_NONE, 2.0
+    if silent is None:
+        return AUDIO_UNMEASURED, 0.5
     if silent:
         return AUDIO_SILENT, 1.0
     return AUDIO_PRESENT, 0.0

@@ -15,12 +15,19 @@ if not exist ".venv\Scripts\pythonw.exe" (
         exit /b 1
     )
     ".venv\Scripts\python.exe" -m pip install --upgrade pip
+)
+
+rem requirements.txt 和上次装的不一样（比如更新了代码）就重新装依赖
+fc /b requirements.txt ".venv\requirements.installed" >nul 2>&1
+if errorlevel 1 (
+    echo 正在安装 / 更新依赖，请稍等...
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
     if errorlevel 1 (
         echo 依赖安装失败，请检查网络后重试。
         pause
         exit /b 1
     )
+    copy /y requirements.txt ".venv\requirements.installed" >nul
 )
 
 start "" ".venv\Scripts\pythonw.exe" main.py

@@ -20,16 +20,12 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-from . import containers
+from . import audio, containers
 from .models import VideoInfo
 
 # Windows 下用 subprocess 调外部程序会闪一下黑框，加这个标志可以避免。
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 _SUBPROCESS_TIMEOUT = 30
-
-# 静音检测最多分析前 10 分钟音频；峰值低于 -50 dB 视为没有声音
-SILENCE_ANALYZE_SECONDS = 600
-SILENCE_THRESHOLD_DB = -50.0
 _SILENCE_TIMEOUT = 90
 
 
@@ -94,10 +90,7 @@ def probe(path: Path, thumb_width: int = 320, thumb_height: int = 180) -> ProbeR
     info.height = meta.get("height")
     info.codec = meta.get("codec") or ""
     info.has_audio = meta.get("has_audio")
-    if info.has_audio is None:
-        info.has_audio = containers.has_audio_track(path)
-    if info.has_audio and FFMPEG:
-        info.audio_silent = _is_silent(path)
+    fill_audio(info)
 
     if frame is not None:
         frame = match_orientation(frame, info.width, info.height, meta.get("rotation", 0))
@@ -184,13 +177,43 @@ def _ffprobe(path: Path) -> Optional[dict]:
     }
 
 
-def _is_silent(path: Path) -> Optional[bool]:
+def fill_audio(info: VideoInfo) -> None:
+    """补全有无音轨 / 是否静音；已经识别出来的项不会被覆盖成 None。"""
+    if audio.available():
+        has_audio, silent = audio.inspect(info.path, info.duration)
+        if has_audio is not None:
+            info.has_audio = has_audio
+    else:
+        if info.has_audio is None:
+            info.has_audio = containers.has_audio_track(info.path)
+        silent = _ffmpeg_is_silent(info.path) if FFMPEG and info.has_audio is not False else None
+        if info.has_audio is None and silent is not None:
+            info.has_audio = True
+    info.audio_silent = silent if info.has_audio else None
+
+
+def can_measure_silence() -> bool:
+    return audio.available() or bool(FFMPEG)
+
+
+def silence_backend() -> str:
+    if audio.available():
+        return "PyAV {}（检查所有音轨）".format(audio.version())
+    if FFMPEG:
+        return "ffmpeg（只检查第一条音轨）"
+    return "不可用：请重新运行 run_windows.bat 安装 PyAV"
+
+
+def _ffmpeg_is_silent(path: Path) -> Optional[bool]:
+    """没装 PyAV 时的退路：只看第一条音轨、前 10 分钟。"""
     command = [
         FFMPEG,
         "-hide_banner",
         "-nostats",
+        "-v",
+        "error",
         "-t",
-        str(SILENCE_ANALYZE_SECONDS),
+        str(int(audio.FULL_SCAN_SECONDS)),
         "-i",
         str(path),
         "-map",
@@ -199,7 +222,8 @@ def _is_silent(path: Path) -> Optional[bool]:
         "-sn",
         "-dn",
         "-af",
-        "volumedetect",
+        "asetnsamples=n=1024,astats=metadata=1:reset=1:measure_perchannel=none,"
+        "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-",
         "-f",
         "null",
         "-",
@@ -207,31 +231,34 @@ def _is_silent(path: Path) -> Optional[bool]:
     try:
         completed = subprocess.run(
             command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             timeout=_SILENCE_TIMEOUT,
             creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    peak = parse_max_volume(completed.stderr.decode("utf-8", "replace"))
-    if peak is None:
+    loudest = parse_loudest_rms(completed.stdout.decode("utf-8", "replace"))
+    if loudest is None:
         return None
-    return peak < SILENCE_THRESHOLD_DB
+    return loudest < audio.SILENCE_THRESHOLD_DB
 
 
-def parse_max_volume(log: str) -> Optional[float]:
-    """从 volumedetect 的输出里取 ``max_volume: -91.0 dB``。"""
-    for line in reversed(log.splitlines()):
-        marker = line.find("max_volume:")
-        if marker < 0:
+def parse_loudest_rms(log: str) -> Optional[float]:
+    """从 astats 逐段输出的 ``lavfi.astats.Overall.RMS_level=-50.1`` 里取最大值。"""
+    loudest: Optional[float] = None
+    for line in log.splitlines():
+        _key, separator, value = line.partition("RMS_level=")
+        if not separator:
             continue
-        value = line[marker + len("max_volume:") :].strip().split(" ")[0]
         try:
-            return float(value)
+            level = float(value.strip())
         except ValueError:
-            return None
-    return None
+            continue
+        if level != level:
+            continue
+        loudest = level if loudest is None else max(loudest, level)
+    return loudest
 
 
 def _rotation(stream: dict) -> int:
