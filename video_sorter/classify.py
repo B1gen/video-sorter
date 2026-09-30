@@ -1,4 +1,4 @@
-"""分类规则：时长 / 帧率 / 分辨率的分档逻辑。
+"""分类规则：时长 / 帧率 / 分辨率 / 声音的分档逻辑。
 
 想改分类档位，直接改本文件顶部的三张表即可，界面会自动跟着变。
 """
@@ -56,6 +56,11 @@ UNKNOWN_DURATION = "未知时长"
 UNKNOWN_FPS = "未知帧率"
 UNKNOWN_RESOLUTION = "未知分辨率"
 
+AUDIO_PRESENT = "有声音"
+AUDIO_SILENT = "无声音（音轨是静音）"
+AUDIO_NONE = "无声音（没有音轨）"
+AUDIO_UNKNOWN = "声音未知"
+
 # 未知档位在分类树里排到最后。
 UNKNOWN_RANK = float("inf")
 
@@ -68,6 +73,9 @@ GROUP_MODES: Sequence[Tuple[str, str, Tuple[str, ...]]] = (
     ("resolution_duration", "分辨率 → 时长", ("resolution", "duration")),
     ("duration_fps", "时长 → 帧率", ("duration", "fps")),
     ("all", "分辨率 → 帧率 → 时长", ("resolution", "fps", "duration")),
+    ("audio", "声音", ("audio",)),
+    ("audio_duration", "声音 → 时长", ("audio", "duration")),
+    ("audio_resolution", "声音 → 分辨率", ("audio", "resolution")),
 )
 
 
@@ -105,18 +113,35 @@ def resolution_label(width: Optional[int], height: Optional[int]) -> Tuple[str, 
     return "{}p".format(short_side), float(short_side), orientation
 
 
+def audio_label(has_audio: Optional[bool], silent: Optional[bool]) -> Tuple[str, float]:
+    if has_audio is None:
+        return AUDIO_UNKNOWN, UNKNOWN_RANK
+    if not has_audio:
+        return AUDIO_NONE, 2.0
+    if silent:
+        return AUDIO_SILENT, 1.0
+    return AUDIO_PRESENT, 0.0
+
+
+def is_muted(labels: VideoLabels) -> bool:
+    return labels.audio in (AUDIO_SILENT, AUDIO_NONE)
+
+
 def labels_for(info: VideoInfo) -> VideoLabels:
     duration_text, duration_rank = duration_label(info.duration)
     fps_text, fps_rank = fps_label(info.fps)
     resolution_text, resolution_rank, orientation = resolution_label(info.width, info.height)
+    audio_text, audio_rank = audio_label(info.has_audio, info.audio_silent)
     return VideoLabels(
         duration=duration_text,
         fps=fps_text,
         resolution=resolution_text,
         orientation=orientation,
+        audio=audio_text,
         duration_rank=duration_rank,
         fps_rank=fps_rank,
         resolution_rank=resolution_rank,
+        audio_rank=audio_rank,
     )
 
 
@@ -126,6 +151,7 @@ def group_path(labels: VideoLabels, dimensions: Sequence[str]) -> List[str]:
         "duration": labels.duration,
         "fps": labels.fps,
         "resolution": labels.resolution,
+        "audio": labels.audio,
     }
     return [values[dimension] for dimension in dimensions]
 
@@ -135,6 +161,7 @@ def rank_of(labels: VideoLabels, dimension: str) -> float:
         "duration": labels.duration_rank,
         "fps": labels.fps_rank,
         "resolution": labels.resolution_rank,
+        "audio": labels.audio_rank,
     }
     return ranks[dimension]
 

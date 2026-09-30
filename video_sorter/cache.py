@@ -13,7 +13,8 @@ from PySide6.QtGui import QImage
 
 from .models import VideoInfo
 
-CACHE_VERSION = 1
+# 2：增加了音轨 / 静音识别，旧缓存里没有这两项，需要重新识别
+CACHE_VERSION = 2
 
 
 class ThumbnailCache:
