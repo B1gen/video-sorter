@@ -30,6 +30,7 @@ SORT_FIELDS = (
     ("fps", "帧率"),
     ("resolution", "分辨率"),
     ("size", "文件大小"),
+    ("audio", "声音"),
 )
 
 
@@ -51,6 +52,8 @@ class VideoItem:
         ]
         if self.labels.orientation in ("竖屏", "方形"):
             parts.append(self.labels.orientation)
+        if classify.is_muted(self.labels):
+            parts.append("无声")
         return "  ·  ".join(parts)
 
     def pixmap(self, width: int, height: int) -> Optional[QPixmap]:
@@ -80,6 +83,8 @@ class VideoItem:
             return float((info.width or 0) * (info.height or 0))
         if field_name == "size":
             return float(info.size_bytes)
+        if field_name == "audio":
+            return self.labels.audio_rank
         return info.name.lower()
 
 
@@ -255,6 +260,8 @@ class ThumbnailDelegate(QStyledItemDelegate):
         badge = classify.format_duration(item.info.duration)
         if badge != "--:--":
             _draw_badge(painter, thumb_rect, badge)
+        if classify.is_muted(item.labels):
+            _draw_badge(painter, thumb_rect, "无声", top_left=True)
 
         text_rect = QRect(
             rect.left() + 4,
@@ -311,19 +318,22 @@ def _draw_preview(painter: QPainter, thumb_rect: QRect, image: QImage, progress:
     painter.restore()
 
 
-def _draw_badge(painter: QPainter, thumb_rect: QRect, text: str) -> None:
+def _draw_badge(painter: QPainter, thumb_rect: QRect, text: str, top_left: bool = False) -> None:
     metrics = QFontMetrics(painter.font())
     padding = 5
     badge_width = metrics.horizontalAdvance(text) + padding * 2
     badge_height = metrics.height() + 2
-    badge = QRect(
-        thumb_rect.right() - badge_width - 5,
-        thumb_rect.bottom() - badge_height - 5,
-        badge_width,
-        badge_height,
-    )
+    if top_left:
+        badge = QRect(thumb_rect.left() + 5, thumb_rect.top() + 5, badge_width, badge_height)
+    else:
+        badge = QRect(
+            thumb_rect.right() - badge_width - 5,
+            thumb_rect.bottom() - badge_height - 5,
+            badge_width,
+            badge_height,
+        )
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(0, 0, 0, 170))
+    painter.setBrush(QColor(190, 60, 60, 200) if top_left else QColor(0, 0, 0, 170))
     painter.drawRoundedRect(badge, 3, 3)
     painter.setPen(QColor(240, 240, 240))
     painter.drawText(badge, int(Qt.AlignmentFlag.AlignCenter), text)
@@ -345,6 +355,7 @@ def _tooltip(item: VideoItem) -> str:
         ),
         "分类：{}".format(_escape(item.labels.resolution)),
         "大小：{}".format(classify.format_size(info.size_bytes)),
+        "声音：{}".format(_escape(item.labels.audio)),
     ]
     if info.codec:
         rows.append("编码：{}".format(_escape(info.codec)))

@@ -488,7 +488,7 @@ class MainWindow(QMainWindow):
             info = items[0].info
             labels = items[0].labels
             self._detail_label.setText(
-                "{}　|　{}　|　{}　|　{}×{} {}　|　{}".format(
+                "{}　|　{}　|　{}　|　{}×{} {}　|　{}　|　{}".format(
                     info.name,
                     classify.format_duration(info.duration),
                     labels.fps,
@@ -496,6 +496,7 @@ class MainWindow(QMainWindow):
                     info.height or 0,
                     labels.orientation,
                     classify.format_size(info.size_bytes),
+                    labels.audio,
                 )
             )
         elif items:
@@ -574,7 +575,7 @@ class MainWindow(QMainWindow):
             self,
             config.APP_NAME,
             "<b>{}</b><br><br>"
-            "按时长 / 帧率 / 分辨率给视频分组。鼠标停在缩略图上自动预览，"
+            "按时长 / 帧率 / 分辨率 / 有无声音给视频分组。鼠标停在缩略图上自动预览，"
             "选中后按空格用系统播放器播放，双击可在文件夹中定位。<br><br>"
             "ffprobe：{}<br>ffmpeg：{}".format(
                 config.APP_NAME,

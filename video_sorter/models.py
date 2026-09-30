@@ -48,6 +48,9 @@ class VideoInfo:
     height: Optional[int] = None
     codec: str = ""
     error: str = ""
+    # None 表示没能识别；audio_silent 只有装了 ffmpeg 才能测出来
+    has_audio: Optional[bool] = None
+    audio_silent: Optional[bool] = None
 
     @property
     def name(self) -> str:
@@ -66,6 +69,8 @@ class VideoInfo:
             "height": self.height,
             "codec": self.codec,
             "error": self.error,
+            "has_audio": self.has_audio,
+            "audio_silent": self.audio_silent,
         }
 
     @classmethod
@@ -79,6 +84,8 @@ class VideoInfo:
             height=data.get("height"),
             codec=data.get("codec") or "",
             error=data.get("error") or "",
+            has_audio=data.get("has_audio"),
+            audio_silent=data.get("audio_silent"),
         )
 
 
@@ -90,6 +97,8 @@ class VideoLabels:
     fps: str = "未知帧率"
     resolution: str = "未知分辨率"
     orientation: str = ""
+    audio: str = "声音未知"
     duration_rank: float = float("inf")
     fps_rank: float = float("inf")
     resolution_rank: float = float("inf")
+    audio_rank: float = float("inf")

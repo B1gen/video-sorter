@@ -20,11 +20,17 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from . import containers
 from .models import VideoInfo
 
 # Windows 下用 subprocess 调外部程序会闪一下黑框，加这个标志可以避免。
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 _SUBPROCESS_TIMEOUT = 30
+
+# 静音检测最多分析前 10 分钟音频；峰值低于 -50 dB 视为没有声音
+SILENCE_ANALYZE_SECONDS = 600
+SILENCE_THRESHOLD_DB = -50.0
+_SILENCE_TIMEOUT = 90
 
 
 def _tool_path(name: str) -> str:
@@ -87,6 +93,11 @@ def probe(path: Path, thumb_width: int = 320, thumb_height: int = 180) -> ProbeR
     info.width = meta.get("width")
     info.height = meta.get("height")
     info.codec = meta.get("codec") or ""
+    info.has_audio = meta.get("has_audio")
+    if info.has_audio is None:
+        info.has_audio = containers.has_audio_track(path)
+    if info.has_audio and FFMPEG:
+        info.audio_silent = _is_silent(path)
 
     if frame is not None:
         frame = match_orientation(frame, info.width, info.height, meta.get("rotation", 0))
@@ -113,8 +124,6 @@ def _ffprobe(path: Path) -> Optional[dict]:
         FFPROBE,
         "-v",
         "error",
-        "-select_streams",
-        "v:0",
         "-show_streams",
         "-show_format",
         "-of",
@@ -139,9 +148,15 @@ def _ffprobe(path: Path) -> Optional[dict]:
         return None
 
     streams = payload.get("streams") or []
-    if not streams:
+    videos = [item for item in streams if item.get("codec_type") == "video"]
+    # 封面图也算 video 流，优先选真正的画面
+    real_videos = [
+        item for item in videos if not (item.get("disposition") or {}).get("attached_pic")
+    ]
+    if not videos:
         return None
-    stream = streams[0]
+    stream = (real_videos or videos)[0]
+    has_audio = any(item.get("codec_type") == "audio" for item in streams)
 
     width = _as_int(stream.get("width"))
     height = _as_int(stream.get("height"))
@@ -165,7 +180,58 @@ def _ffprobe(path: Path) -> Optional[dict]:
         "duration": duration,
         "codec": stream.get("codec_name") or "",
         "rotation": rotation,
+        "has_audio": has_audio,
     }
+
+
+def _is_silent(path: Path) -> Optional[bool]:
+    command = [
+        FFMPEG,
+        "-hide_banner",
+        "-nostats",
+        "-t",
+        str(SILENCE_ANALYZE_SECONDS),
+        "-i",
+        str(path),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-af",
+        "volumedetect",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=_SILENCE_TIMEOUT,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    peak = parse_max_volume(completed.stderr.decode("utf-8", "replace"))
+    if peak is None:
+        return None
+    return peak < SILENCE_THRESHOLD_DB
+
+
+def parse_max_volume(log: str) -> Optional[float]:
+    """从 volumedetect 的输出里取 ``max_volume: -91.0 dB``。"""
+    for line in reversed(log.splitlines()):
+        marker = line.find("max_volume:")
+        if marker < 0:
+            continue
+        value = line[marker + len("max_volume:") :].strip().split(" ")[0]
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _rotation(stream: dict) -> int:
