@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
+    QPoint,
     QRect,
     QSize,
     QSortFilterProxyModel,
@@ -185,6 +187,23 @@ class ThumbnailDelegate(QStyledItemDelegate):
     def __init__(self, display_size: Tuple[int, int], parent=None) -> None:
         super().__init__(parent)
         self.display_size = display_size
+        self._preview_path: Optional[Path] = None
+        self._preview_image: Optional[QImage] = None
+        self._preview_progress = 0.0
+
+    def set_preview(self, path: Path, image: QImage, progress: float) -> None:
+        self._preview_path = path
+        self._preview_image = image
+        self._preview_progress = progress
+
+    def clear_preview(self) -> None:
+        self._preview_path = None
+        self._preview_image = None
+        self._preview_progress = 0.0
+
+    def thumbnail_rect(self, item_rect: QRect) -> QRect:
+        rect = item_rect.adjusted(4, 4, -4, -4)
+        return QRect(rect.left() + 4, rect.top() + 4, rect.width() - 8, self.display_size[1])
 
     def sizeHint(self, option, index: QModelIndex) -> QSize:  # noqa: N802
         return item_size(self.display_size)
@@ -212,13 +231,16 @@ class ThumbnailDelegate(QStyledItemDelegate):
         painter.drawRoundedRect(rect, 6, 6)
 
         width, height = self.display_size
-        thumb_rect = QRect(rect.left() + 4, rect.top() + 4, rect.width() - 8, height)
+        thumb_rect = self.thumbnail_rect(option.rect)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(24, 24, 27))
         painter.drawRoundedRect(thumb_rect, 4, 4)
 
+        previewing = self._preview_image is not None and item.info.path == self._preview_path
         pixmap = item.pixmap(width, height)
-        if pixmap is not None and not pixmap.isNull():
+        if previewing:
+            _draw_preview(painter, thumb_rect, self._preview_image, self._preview_progress)
+        elif pixmap is not None and not pixmap.isNull():
             target = QRect(0, 0, pixmap.width(), pixmap.height())
             target.moveCenter(thumb_rect.center())
             painter.drawPixmap(target, pixmap)
@@ -273,6 +295,20 @@ class ThumbnailDelegate(QStyledItemDelegate):
             meta,
         )
         painter.restore()
+
+
+def _draw_preview(painter: QPainter, thumb_rect: QRect, image: QImage, progress: float) -> None:
+    size = image.size().scaled(thumb_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
+    target = QRect(QPoint(0, 0), size)
+    target.moveCenter(thumb_rect.center())
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    painter.drawImage(target, image)
+    bar = QRect(thumb_rect.left(), thumb_rect.bottom() - 2, thumb_rect.width(), 3)
+    painter.fillRect(bar, QColor(255, 255, 255, 60))
+    bar.setWidth(int(round(bar.width() * progress)))
+    painter.fillRect(bar, QColor(56, 118, 214))
+    painter.restore()
 
 
 def _draw_badge(painter: QPainter, thumb_rect: QRect, text: str) -> None:

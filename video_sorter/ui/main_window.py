@@ -5,8 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QGuiApplication, QKeySequence
+from PySide6.QtCore import QEvent, QObject, QPersistentModelIndex, QSettings, Qt, QTimer
+from PySide6.QtGui import (
+    QAction,
+    QCursor,
+    QDragEnterEvent,
+    QDropEvent,
+    QGuiApplication,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -30,6 +37,7 @@ from PySide6.QtWidgets import (
 from .. import classify, config, probe, reveal
 from ..cache import ThumbnailCache
 from ..models import VideoInfo
+from ..preview import HoverPreview
 from ..scanner import ScanController
 from .category_tree import CategoryTree
 from .drop_area import DropArea, paths_from_mime
@@ -61,6 +69,8 @@ class MainWindow(QMainWindow):
         self._pending: List[Tuple[VideoInfo, object]] = []
         self._error_count = 0
         self._scan_progress: Tuple[int, int] = (0, 0)
+        self._preview = HoverPreview(self)
+        self._hover_index = QPersistentModelIndex()
 
         self._build_ui()
         self._build_menu()
@@ -133,6 +143,13 @@ class MainWindow(QMainWindow):
         self._tree_timer = QTimer(self)
         self._tree_timer.setInterval(TREE_REFRESH_MS)
         self._tree_timer.timeout.connect(self._rebuild_tree)
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(config.HOVER_PREVIEW_DELAY_MS)
+        self._hover_timer.timeout.connect(self._start_preview)
+
+        self._view.installEventFilter(self)
+        self._view.viewport().installEventFilter(self)
 
     def _build_toolbar(self) -> QHBoxLayout:
         layout = QHBoxLayout()
@@ -199,6 +216,13 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        view_menu = self.menuBar().addMenu("视图")
+        self._preview_action = QAction("鼠标悬停时播放预览", self)
+        self._preview_action.setCheckable(True)
+        self._preview_action.setChecked(True)
+        self._preview_action.toggled.connect(self._on_preview_toggled)
+        view_menu.addAction(self._preview_action)
+
         tools_menu = self.menuBar().addMenu("工具")
         clear_cache_action = QAction("清空缩略图缓存", self)
         clear_cache_action.triggered.connect(self._clear_cache)
@@ -228,6 +252,11 @@ class MainWindow(QMainWindow):
         self._proxy.rowsInserted.connect(lambda *_args: self._update_status())
         self._proxy.rowsRemoved.connect(lambda *_args: self._update_status())
         self._proxy.modelReset.connect(self._update_status)
+        self._proxy.modelReset.connect(self._clear_hover)
+        self._proxy.layoutChanged.connect(self._refresh_hover)
+        self._proxy.rowsRemoved.connect(lambda *_args: self._refresh_hover())
+        self._view.verticalScrollBar().valueChanged.connect(lambda _value: self._refresh_hover())
+        self._preview.frameReady.connect(self._on_preview_frame)
         self._scanner.videoReady.connect(self._on_video_ready)
         self._scanner.progress.connect(self._on_progress)
         self._scanner.scanFinished.connect(self._on_scan_finished)
@@ -333,6 +362,7 @@ class MainWindow(QMainWindow):
 
     def _on_size_changed(self, index: int) -> None:
         size = config.DISPLAY_SIZES[max(0, min(index, len(config.DISPLAY_SIZES) - 1))]
+        self._clear_hover()
         self._apply_display_size(size)
         self._model.drop_pixmap_cache()
         self._settings.setValue("thumb_index", index)
@@ -355,6 +385,94 @@ class MainWindow(QMainWindow):
             return
         if not reveal.reveal_in_file_manager(item.info.path):
             QMessageBox.warning(self, config.APP_NAME, "文件已不存在或无法打开所在文件夹。")
+
+    def _play_selected(self) -> None:
+        current = self._view.currentIndex()
+        selection = self._view.selectionModel()
+        if current.isValid() and selection.isSelected(current):
+            index = current
+        else:
+            selected = selection.selectedIndexes()
+            index = selected[0] if selected else current
+        item: Optional[VideoItem] = index.data(ITEM_ROLE) if index.isValid() else None
+        if item is None:
+            return
+        self._clear_hover()
+        if not reveal.open_file(item.info.path):
+            QMessageBox.warning(self, config.APP_NAME, "文件已不存在或没有可用的播放器。")
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        kind = event.type()
+        if watched is self._view:
+            if (
+                kind == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Space
+                and not event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+            ):
+                if not event.isAutoRepeat():
+                    self._play_selected()
+                return True
+        elif watched is self._view.viewport():
+            if kind == QEvent.Type.MouseMove:
+                self._set_hover(self._view.indexAt(event.position().toPoint()))
+            elif kind == QEvent.Type.Leave:
+                self._clear_hover()
+            elif kind == QEvent.Type.ToolTip and self._preview_action.isChecked():
+                # 视频上方不弹提示，免得挡住预览；移到下方文件名处仍可看详细信息
+                index = self._view.indexAt(event.pos())
+                if index.isValid() and self._delegate.thumbnail_rect(
+                    self._view.visualRect(index)
+                ).contains(event.pos()):
+                    return True
+        return super().eventFilter(watched, event)
+
+    def _set_hover(self, index) -> None:
+        if index.isValid() and QPersistentModelIndex(index) == self._hover_index:
+            return
+        self._clear_hover()
+        if not index.isValid() or not self._preview_action.isChecked():
+            return
+        self._hover_index = QPersistentModelIndex(index)
+        self._hover_timer.start()
+
+    def _clear_hover(self) -> None:
+        self._hover_timer.stop()
+        self._preview.stop()
+        self._delegate.clear_preview()
+        if self._hover_index.isValid():
+            self._view.viewport().update(self._view.visualRect(self._hover_index))
+        self._hover_index = QPersistentModelIndex()
+
+    def _refresh_hover(self) -> None:
+        """滚动或列表变化后，光标下的缩略图可能换了。"""
+        viewport = self._view.viewport()
+        position = viewport.mapFromGlobal(QCursor.pos())
+        if viewport.rect().contains(position):
+            self._set_hover(self._view.indexAt(position))
+        else:
+            self._clear_hover()
+
+    def _start_preview(self) -> None:
+        if not self._hover_index.isValid() or not self.isActiveWindow():
+            return
+        item: Optional[VideoItem] = self._hover_index.data(ITEM_ROLE)
+        if item is None or item.info.error:
+            return
+        self._preview.start(item.info, self._delegate.display_size)
+
+    def _on_preview_frame(self, token: int, path: Path, image, progress: float) -> None:
+        if token != self._preview.token or not self._hover_index.isValid():
+            return
+        item: Optional[VideoItem] = self._hover_index.data(ITEM_ROLE)
+        if item is None or item.info.path != path:
+            return
+        self._delegate.set_preview(path, image, progress)
+        self._view.viewport().update(self._view.visualRect(self._hover_index))
+
+    def _on_preview_toggled(self, checked: bool) -> None:
+        self._settings.setValue("hover_preview", checked)
+        if not checked:
+            self._clear_hover()
 
     def _selected_items(self) -> List[VideoItem]:
         items = []
@@ -393,7 +511,7 @@ class MainWindow(QMainWindow):
         item: Optional[VideoItem] = index.data(ITEM_ROLE) if index.isValid() else None
         menu = QMenu(self)
         locate_action = menu.addAction("定位到文件夹（双击）")
-        play_action = menu.addAction("用默认播放器打开")
+        play_action = menu.addAction("用默认播放器打开（空格）")
         menu.addSeparator()
         copy_path_action = menu.addAction("复制完整路径")
         copy_name_action = menu.addAction("复制文件名")
@@ -406,6 +524,7 @@ class MainWindow(QMainWindow):
         if chosen is locate_action:
             reveal.reveal_in_file_manager(item.info.path)
         elif chosen is play_action:
+            self._clear_hover()
             reveal.open_file(item.info.path)
         elif chosen is copy_path_action:
             QGuiApplication.clipboard().setText(str(item.info.path))
@@ -455,7 +574,8 @@ class MainWindow(QMainWindow):
             self,
             config.APP_NAME,
             "<b>{}</b><br><br>"
-            "按时长 / 帧率 / 分辨率给视频分组，双击缩略图可在文件夹中定位。<br><br>"
+            "按时长 / 帧率 / 分辨率给视频分组。鼠标停在缩略图上自动预览，"
+            "选中后按空格用系统播放器播放，双击可在文件夹中定位。<br><br>"
             "ffprobe：{}<br>ffmpeg：{}".format(
                 config.APP_NAME,
                 ffprobe_path or "未安装（使用内置解码器）",
@@ -481,6 +601,8 @@ class MainWindow(QMainWindow):
         self._sort_combo.setCurrentIndex(sort_index if sort_index >= 0 else 0)
         self._desc_box.setChecked(self._settings.value("sort_desc", False, type=bool))
 
+        self._preview_action.setChecked(self._settings.value("hover_preview", True, type=bool))
+
         thumb_index = self._settings.value("thumb_index", config.DEFAULT_DISPLAY_INDEX, type=int)
         self._size_slider.setValue(max(0, min(thumb_index, len(config.DISPLAY_SIZES) - 1)))
 
@@ -488,10 +610,17 @@ class MainWindow(QMainWindow):
         self._model.set_sort_field(self._sort_combo.currentData())
         self._on_sort_changed()
 
+    def changeEvent(self, event) -> None:  # noqa: N802
+        if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+            self._clear_hover()
+        super().changeEvent(event)
+
     def closeEvent(self, event) -> None:  # noqa: N802
         self._settings.setValue("geometry", self.saveGeometry())
         self._flush_timer.stop()
         self._tree_timer.stop()
+        self._hover_timer.stop()
+        self._preview.shutdown()
         self._scanner.wait_for_shutdown()
         super().closeEvent(event)
 
