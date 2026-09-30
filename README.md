@@ -8,22 +8,37 @@
 
 ## 快速开始
 
-### 方式一：双击运行（需要电脑上有 Python 3.9+）
+### 方式一：直接下载 exe（推荐，不需要装 Python）
 
-双击 `run_windows.bat`。第一次会自动建虚拟环境并装依赖（约 200 MB，需要联网），之后每次都是秒开。
+到 GitHub 仓库的 **Releases** 页面（https://github.com/B1gen/video-sorter/releases/latest）下载：
+
+* **`VideoSorter.exe`**：单个文件，双击就能用，方便拷到别的电脑（每次启动先解压，慢几秒）；
+* **`VideoSorter-版本号-windows.zip`**：文件夹版，解压后双击里面的 `VideoSorter.exe`，启动更快。
+
+第一次打开时 Windows 可能提示「Windows 已保护你的电脑」（程序没有数字签名），点「更多信息 → 仍要运行」。
+也可以把文件夹直接拖到 exe 图标上，启动后会自动开始扫描。
+
+这些 exe 由 GitHub Actions（`.github/workflows/build-windows.yml`）在 Windows 上自动打包：
+每次合并到 `main` 都会重新打包，并更新 `video_sorter/__init__.py` 里版本号对应的 Release；
+想发新版本，改一下 `__version__` 再合并即可。每个 PR 也会打包一次，
+在 PR 的 Checks → 「Build Windows exe」→ Summary 页面底部的 Artifacts 里可以下载试用。
+打包后会用 `VideoSorter.exe --self-test 报告文件` 实际解码视频、识别声音、写缓存，全部通过才算成功。
+
+### 方式二：双击 `run_windows.bat` 运行源码（需要电脑上有 Python 3.9+）
+
+第一次会自动建虚拟环境并装依赖（约 200 MB，需要联网），之后每次都是秒开；更新代码后依赖有变化也会自动补装。
 
 没装 Python 的话，去 https://www.python.org/downloads/windows/ 下载安装，
 安装时勾选 **Add python.exe to PATH**。
 
-### 方式二：打包成 exe，之后不再需要 Python
+### 方式三：自己在本机打包 exe
 
 ```bat
-build_windows.bat            :: 打包成文件夹，启动快 -> dist\VideoSorter\VideoSorter.exe
+build_windows.bat            :: 打包成文件夹，启动快 -> dist\VideoSorter\VideoSorter.exe（另附 zip）
 build_windows.bat onefile    :: 打包成单个 exe，方便拷到别的电脑 -> dist\VideoSorter.exe
 ```
 
-把 `dist` 里的成果拷到任何一台 Windows 上都能双击运行。也可以把文件夹直接拖到 exe 图标上，
-启动后会自动开始扫描。
+打包参数都在 `packaging/build.py` 里，本机打包和 GitHub 自动打包用的是同一份。
 
 ### 开发者用法
 
@@ -31,7 +46,8 @@ build_windows.bat onefile    :: 打包成单个 exe，方便拷到别的电脑 -
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 .venv\Scripts\python main.py
-python tests/test_classify.py     # 分类规则回归测试
+python -m pytest tests            # 全部测试
+python main.py --self-test report.txt   # 和打包后一样的自检
 ```
 
 ## 界面怎么用
@@ -112,7 +128,7 @@ rm、rmvb、ogv、divx、mxf、dv 等（列表在 `video_sorter/models.py` 的 `
 
 * 少数需要专有解码器的文件（如部分 rmvb、加密流）可能读不出信息，会显示为「未知」档并在状态栏计数；
   装上 ffmpeg 通常能解决。
-* 代码本身跨平台（macOS / Linux 也能跑，双击会调用对应的 Finder / 文件管理器），但打包脚本只写了 Windows。
+* 代码本身跨平台（macOS / Linux 也能跑，双击会调用对应的 Finder / 文件管理器）；`packaging/build.py` 在 macOS / Linux 上也能打包，但自动发布只做了 Windows。
 
 ## 项目结构
 
@@ -127,6 +143,8 @@ video_sorter/
   cache.py                   元信息与缩略图磁盘缓存
   preview.py                 悬停预览：后台线程用 OpenCV 按原速解码
   reveal.py                  在资源管理器中定位 / 打开文件
+  icon.py                    程序图标（代码绘制，打包时导出成 exe 图标）
+  selftest.py                --self-test 自检
   models.py  imaging.py  config.py
   ui/
     main_window.py           主窗口与交互
@@ -135,6 +153,8 @@ video_sorter/
     list_model.py            缩略图网格的模型 / 过滤 / 绘制
 tests/test_classify.py       分类规则测试
 tests/test_audio.py          音轨识别测试
-run_windows.bat              双击运行
-build_windows.bat            打包 exe
+run_windows.bat              双击运行源码
+build_windows.bat            本机打包 exe
+packaging/build.py           打包脚本（PyInstaller 参数都在这里）
+.github/workflows/           GitHub 上自动打包 Windows exe 并发布 Release
 ```

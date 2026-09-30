@@ -6,7 +6,8 @@ from typing import List
 
 from PySide6.QtWidgets import QApplication
 
-from . import config
+from . import config, selftest
+from .icon import app_icon
 from .ui.main_window import MainWindow
 
 
@@ -16,6 +17,11 @@ def main(argv: List[str] = None) -> int:
     app.setApplicationName(config.APP_NAME)
     app.setApplicationDisplayName(config.APP_NAME)
     app.setOrganizationName(config.ORG_NAME)
+    app.setWindowIcon(app_icon())
+
+    wants_self_test, report_path = selftest.parse_args(argv)
+    if wants_self_test:
+        return selftest.run(report_path)
 
     window = MainWindow()
     window.show()
