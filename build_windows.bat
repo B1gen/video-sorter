@@ -39,6 +39,7 @@ if /i "%1"=="onefile" set MODE=--onefile
     --exclude-module PySide6.QtDataVisualization ^
     --exclude-module PySide6.QtMultimedia ^
     --exclude-module matplotlib ^
+    --collect-all av ^
     main.py
 if errorlevel 1 (
     echo 打包失败。

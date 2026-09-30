@@ -7,12 +7,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from video_sorter import classify  # noqa: E402
+from video_sorter import audio, classify, probe  # noqa: E402
+
+av = audio.av
 from video_sorter.containers import has_audio_track  # noqa: E402
 from video_sorter.models import VideoInfo  # noqa: E402
-from video_sorter.probe import parse_max_volume  # noqa: E402
 
 
 def _box(kind: bytes, payload: bytes) -> bytes:
@@ -75,17 +78,84 @@ def test_unsupported_container_is_unknown():
     assert _check("a.avi", b"RIFF....AVI ") is None
 
 
-def test_parse_max_volume():
-    log = "[Parsed_volumedetect_0 @ 0x1] mean_volume: -20.5 dB\n[Parsed_volumedetect_0 @ 0x1] max_volume: -3.2 dB\n"
-    assert parse_max_volume(log) == -3.2
-    assert parse_max_volume("max_volume: -91.0 dB") == -91.0
-    assert parse_max_volume("max_volume: -inf dB") == float("-inf")
-    assert parse_max_volume("no audio here") is None
+def test_parse_loudest_rms():
+    log = (
+        "frame:0    pts:0       pts_time:0\n"
+        "lavfi.astats.Overall.RMS_level=-60.5\n"
+        "lavfi.astats.Overall.RMS_level=-31.2\n"
+        "lavfi.astats.Overall.RMS_level=-inf\n"
+        "lavfi.astats.Overall.RMS_level=nan\n"
+    )
+    assert probe.parse_loudest_rms(log) == -31.2
+    assert probe.parse_loudest_rms("lavfi.astats.Overall.RMS_level=-inf") == float("-inf")
+    assert probe.parse_loudest_rms("no audio here") is None
+
+
+_RATE = 16000
+
+
+def _silence(count: int) -> np.ndarray:
+    return np.zeros(count)
+
+
+def _hiss(count: int) -> np.ndarray:
+    # 约 -50 dBFS 的白噪声：峰值能到 -40 dB 左右，但听起来就是没声音
+    return np.random.default_rng(0).uniform(-0.0055, 0.0055, count)
+
+
+def _tone(count: int) -> np.ndarray:
+    return 0.05 * np.sin(np.arange(count) * 2 * np.pi * 440 / _RATE)
+
+
+def _beep_at_end(count: int) -> np.ndarray:
+    samples = np.zeros(count)
+    samples[-800:] = 0.3
+    return samples
+
+
+def _write_audio(path: Path, tracks, seconds: float = 2.0) -> None:
+    total = int(seconds * _RATE)
+    container = av.open(str(path), "w")
+    streams = [container.add_stream("pcm_s16le", rate=_RATE, layout="mono") for _ in tracks]
+    chunk = 1600
+    for start in range(0, total, chunk):
+        for stream, make in zip(streams, tracks):
+            samples = make(total)[start : start + chunk]
+            frame = av.AudioFrame.from_ndarray(
+                (samples * 32767).astype(np.int16)[None, :], format="s16", layout="mono"
+            )
+            frame.sample_rate = _RATE
+            frame.pts = start
+            for packet in stream.encode(frame):
+                container.mux(packet)
+    for stream in streams:
+        for packet in stream.encode(None):
+            container.mux(packet)
+    container.close()
+
+
+def _inspect(tracks):
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "a.mkv"
+        _write_audio(path, tracks)
+        return audio.inspect(path)
+
+
+def test_silence_detection_with_pyav():
+    if not audio.available():
+        return
+    assert _inspect([_silence]) == (True, True)
+    assert _inspect([_hiss]) == (True, True)
+    assert _inspect([_tone]) == (True, False)
+    assert _inspect([_beep_at_end]) == (True, False)
+    # 有一条音轨有声音就算有声音
+    assert _inspect([_silence, _tone]) == (True, False)
+    assert _inspect([_silence, _hiss]) == (True, True)
 
 
 def test_audio_labels_and_grouping():
     assert classify.audio_label(True, False)[0] == classify.AUDIO_PRESENT
-    assert classify.audio_label(True, None)[0] == classify.AUDIO_PRESENT
+    assert classify.audio_label(True, None)[0] == classify.AUDIO_UNMEASURED
     assert classify.audio_label(True, True)[0] == classify.AUDIO_SILENT
     assert classify.audio_label(False, None)[0] == classify.AUDIO_NONE
     assert classify.audio_label(None, None)[0] == classify.AUDIO_UNKNOWN

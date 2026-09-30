@@ -563,6 +563,8 @@ class MainWindow(QMainWindow):
             parts.append("{} 个无法识别".format(self._error_count))
         if not probe.FFPROBE:
             parts.append("未检测到 ffprobe（已使用内置解码器）")
+        if not probe.can_measure_silence():
+            parts.append("缺少 PyAV，无法识别静音音轨")
         self._status_label.setText("　·　".join(parts))
 
     def _clear_cache(self) -> None:
@@ -577,10 +579,11 @@ class MainWindow(QMainWindow):
             "<b>{}</b><br><br>"
             "按时长 / 帧率 / 分辨率 / 有无声音给视频分组。鼠标停在缩略图上自动预览，"
             "选中后按空格用系统播放器播放，双击可在文件夹中定位。<br><br>"
-            "ffprobe：{}<br>ffmpeg：{}".format(
+            "ffprobe：{}<br>ffmpeg：{}<br>静音识别：{}".format(
                 config.APP_NAME,
                 ffprobe_path or "未安装（使用内置解码器）",
                 ffmpeg_path or "未安装",
+                probe.silence_backend(),
             ),
         )
 
