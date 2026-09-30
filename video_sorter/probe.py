@@ -68,7 +68,7 @@ def probe(path: Path, thumb_width: int = 320, thumb_height: int = 180) -> ProbeR
     meta = _ffprobe(path) if FFPROBE else None
     frame = None
 
-    capture = _open_capture(path)
+    capture = open_capture(path)
     if capture is not None:
         try:
             if meta is None:
@@ -89,17 +89,17 @@ def probe(path: Path, thumb_width: int = 320, thumb_height: int = 180) -> ProbeR
     info.codec = meta.get("codec") or ""
 
     if frame is not None:
-        frame = _match_orientation(frame, info.width, info.height, meta.get("rotation", 0))
+        frame = match_orientation(frame, info.width, info.height, meta.get("rotation", 0))
         if not info.width or not info.height:
             info.height, info.width = frame.shape[0], frame.shape[1]
 
     if not info.duration and not info.width:
         info.error = "无法识别时长和分辨率"
 
-    thumbnail = _fit(frame, thumb_width, thumb_height) if frame is not None else None
+    thumbnail = fit(frame, thumb_width, thumb_height) if frame is not None else None
     if thumbnail is None and FFMPEG:
         fallback = _ffmpeg_frame(path, info.duration, thumb_width, thumb_height)
-        thumbnail = _fit(fallback, thumb_width, thumb_height) if fallback is not None else None
+        thumbnail = fit(fallback, thumb_width, thumb_height) if fallback is not None else None
     return ProbeResult(info, thumbnail)
 
 
@@ -184,7 +184,7 @@ def _rotation(stream: dict) -> int:
 def _ffmpeg_frame(
     path: Path, duration: Optional[float], width: int, height: int
 ) -> Optional[np.ndarray]:
-    timestamp = _thumbnail_timestamp(duration)
+    timestamp = thumbnail_timestamp(duration)
     command = [
         FFMPEG,
         "-v",
@@ -224,7 +224,7 @@ def _ffmpeg_frame(
 # --------------------------------------------------------------------------- #
 
 
-def _open_capture(path: Path):
+def open_capture(path: Path):
     for candidate in _candidate_paths(path):
         capture = cv2.VideoCapture(candidate)
         if capture.isOpened():
@@ -280,7 +280,7 @@ def _capture_metadata(capture) -> dict:
 
 
 def _grab_frame(capture, duration: Optional[float]) -> Optional[np.ndarray]:
-    timestamp = _thumbnail_timestamp(duration)
+    timestamp = thumbnail_timestamp(duration)
     if timestamp > 0:
         capture.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000.0)
         ok, frame = capture.read()
@@ -294,7 +294,7 @@ def _grab_frame(capture, duration: Optional[float]) -> Optional[np.ndarray]:
     return None
 
 
-def _thumbnail_timestamp(duration: Optional[float]) -> float:
+def thumbnail_timestamp(duration: Optional[float]) -> float:
     if not duration or duration <= 1.0:
         return 0.0
     return min(duration * 0.1, 10.0)
@@ -305,7 +305,7 @@ def _thumbnail_timestamp(duration: Optional[float]) -> float:
 # --------------------------------------------------------------------------- #
 
 
-def _match_orientation(
+def match_orientation(
     frame: np.ndarray, width: Optional[int], height: Optional[int], rotation: int
 ) -> np.ndarray:
     """解码器有时不会应用旋转标记，这里让画面方向和元信息保持一致。"""
@@ -320,7 +320,7 @@ def _match_orientation(
     return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
 
-def _fit(frame: Optional[np.ndarray], max_width: int, max_height: int) -> Optional[np.ndarray]:
+def fit(frame: Optional[np.ndarray], max_width: int, max_height: int) -> Optional[np.ndarray]:
     if frame is None or not frame.size:
         return None
     height, width = frame.shape[:2]
