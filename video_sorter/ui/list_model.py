@@ -127,6 +127,21 @@ class VideoListModel(QAbstractListModel):
     def items(self) -> List[VideoItem]:
         return self._items
 
+    def refresh_items(self, items: Sequence[VideoItem]) -> None:
+        wanted = {id(item) for item in items}
+        for row, item in enumerate(self._items):
+            if id(item) in wanted:
+                index = self.index(row, 0)
+                self.dataChanged.emit(index, index)
+
+    def remove_items(self, items: Sequence[VideoItem]) -> None:
+        wanted = {id(item) for item in items}
+        for row in range(len(self._items) - 1, -1, -1):
+            if id(self._items[row]) in wanted:
+                self.beginRemoveRows(QModelIndex(), row, row)
+                del self._items[row]
+                self.endRemoveRows()
+
     def set_sort_field(self, field_name: str) -> None:
         if field_name == self._sort_field:
             return
