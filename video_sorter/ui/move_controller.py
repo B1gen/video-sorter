@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections import Counter
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
@@ -14,7 +15,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressDialog,
-    QPushButton,
     QWidget,
 )
 
@@ -269,8 +269,9 @@ class MoveController(QObject):
         box.setInformativeText(names + "\n\n不会覆盖任何文件。要怎么处理这些重名的视频？")
         rename = box.addButton("自动改名（如 a (1).mp4）", QMessageBox.ButtonRole.AcceptRole)
         skip = box.addButton("跳过重名的", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(rename)
+        box.setEscapeButton(cancel)
         box.exec()
         clicked = box.clickedButton()
         if clicked is rename:
@@ -280,29 +281,38 @@ class MoveController(QObject):
         return None
 
     def _report(self, results: Sequence[MoveResult], summary: str) -> None:
-        problems = [result for result in results if not result.moved]
-        failed = [result for result in problems if result.error]
-        skipped = [result for result in problems if not result.error]
-        if not problems:
-            self.message.emit(summary + "　（Ctrl+Z 可撤销）" if self._last_batch else summary)
-            return
-        lines = []
-        for result in (failed + skipped)[:_REPORT_LINES]:
-            lines.append("· {}：{}".format(result.source.name, result.error or result.skip_reason))
-        if len(problems) > _REPORT_LINES:
-            lines.append("…等 {} 个".format(len(problems)))
+        """跳过的（已在该文件夹、用户选了跳过、中途停止）只在状态栏说明；真正失败的才弹窗。"""
+        failed = [result for result in results if result.error]
+        skipped = [result for result in results if not result.moved and not result.error]
         parts = [summary]
+        if skipped:
+            reasons = Counter(result.skip_reason for result in skipped)
+            parts.append(
+                "{} 个跳过（{}）".format(
+                    len(skipped),
+                    "、".join("{} {} 个".format(reason, count) for reason, count in reasons.items()),
+                )
+            )
         if failed:
             parts.append("{} 个失败".format(len(failed)))
-        if skipped:
-            parts.append("{} 个跳过".format(len(skipped)))
+        text = "，".join(parts)
+        if self._last_batch and not failed:
+            text += "　（Ctrl+Z 可撤销）"
+        self.message.emit(text)
+        if not failed:
+            return
+
+        lines = ["· {}：{}".format(result.source.name, result.error) for result in failed]
+        if len(lines) > _REPORT_LINES:
+            lines = lines[:_REPORT_LINES] + ["…等 {} 个".format(len(failed))]
         box = QMessageBox(
-            QMessageBox.Icon.Warning if failed else QMessageBox.Icon.Information,
+            QMessageBox.Icon.Warning,
             config.APP_NAME,
             "，".join(parts) + "。",
-            parent=self._parent,
+            QMessageBox.StandardButton.Ok,
+            self._parent,
         )
         box.setInformativeText("\n".join(lines))
-        box.addButton(QPushButton("好的"), QMessageBox.ButtonRole.AcceptRole)
+        box.button(QMessageBox.StandardButton.Ok).setText("好的")
+        box.setEscapeButton(QMessageBox.StandardButton.Ok)
         box.exec()
-        self.message.emit("，".join(parts))
