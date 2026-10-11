@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QEvent, QObject, QPersistentModelIndex, QSettings, Qt, QTimer
 from PySide6.QtGui import (
@@ -30,11 +30,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSplitter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from .. import classify, config, probe, reveal
+from .. import classify, config, mover, probe, reveal
 from ..cache import ThumbnailCache
 from ..models import VideoInfo
 from ..preview import HoverPreview
@@ -50,6 +51,7 @@ from .list_model import (
     VideoListModel,
     item_size,
 )
+from .move_controller import MoveController
 
 FLUSH_INTERVAL_MS = 150
 TREE_REFRESH_MS = 600
@@ -71,6 +73,17 @@ class MainWindow(QMainWindow):
         self._scan_progress: Tuple[int, int] = (0, 0)
         self._preview = HoverPreview(self)
         self._hover_index = QPersistentModelIndex()
+        self._moving = False
+        # 被移出扫描范围的条目先留着，撤销移动时还能放回列表
+        self._moved_out: Dict[str, VideoItem] = {}
+        self._mover = MoveController(
+            self,
+            self._settings,
+            selection=lambda: [item.info.path for item in self._selected_items()],
+            roots=lambda: list(self._roots),
+            prepare=self._prepare_move,
+            finish=self._finish_move,
+        )
 
         self._build_ui()
         self._build_menu()
@@ -192,6 +205,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("排序："))
         layout.addWidget(self._sort_combo)
         layout.addWidget(self._desc_box)
+        layout.addSpacing(12)
+        self._move_button = QToolButton()
+        self._move_button.setText("移动到…")
+        self._move_button.setToolTip("把选中的视频（可多选）移动到别的文件夹（Ctrl+M）")
+        self._move_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._move_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._move_button.setMenu(self._mover.menu)
+        self._move_button.setEnabled(False)
+        layout.addWidget(self._move_button)
         layout.addStretch(1)
         layout.addWidget(self._search_edit)
         layout.addSpacing(8)
@@ -215,6 +237,15 @@ class MainWindow(QMainWindow):
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+        edit_menu = self.menuBar().addMenu("编辑")
+        select_all_action = QAction("全选", self)
+        select_all_action.setShortcut(QKeySequence.StandardKey.SelectAll)
+        select_all_action.triggered.connect(self._view.selectAll)
+        edit_menu.addAction(select_all_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self._mover.move_action)
+        edit_menu.addAction(self._mover.undo_action)
 
         view_menu = self.menuBar().addMenu("视图")
         self._preview_action = QAction("鼠标悬停时播放预览", self)
@@ -257,6 +288,8 @@ class MainWindow(QMainWindow):
         self._proxy.rowsRemoved.connect(lambda *_args: self._refresh_hover())
         self._view.verticalScrollBar().valueChanged.connect(lambda _value: self._refresh_hover())
         self._preview.frameReady.connect(self._on_preview_frame)
+        self._mover.filesMoved.connect(self._on_files_moved)
+        self._mover.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
         self._scanner.videoReady.connect(self._on_video_ready)
         self._scanner.progress.connect(self._on_progress)
         self._scanner.scanFinished.connect(self._on_scan_finished)
@@ -286,6 +319,7 @@ class MainWindow(QMainWindow):
         self._drop_area.set_message(_roots_message(roots))
 
         self._pending.clear()
+        self._moved_out.clear()
         self._error_count = 0
         self._model.clear()
         self._rebuild_tree()
@@ -430,7 +464,7 @@ class MainWindow(QMainWindow):
         if index.isValid() and QPersistentModelIndex(index) == self._hover_index:
             return
         self._clear_hover()
-        if not index.isValid() or not self._preview_action.isChecked():
+        if not index.isValid() or not self._preview_action.isChecked() or self._moving:
             return
         self._hover_index = QPersistentModelIndex(index)
         self._hover_timer.start()
@@ -506,6 +540,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self._detail_label.setText("")
+        self._move_button.setEnabled(bool(items))
 
     def _show_context_menu(self, position) -> None:
         index = self._view.indexAt(position)
@@ -518,6 +553,10 @@ class MainWindow(QMainWindow):
         copy_name_action = menu.addAction("复制文件名")
         for action in (locate_action, play_action, copy_path_action, copy_name_action):
             action.setEnabled(item is not None)
+        menu.addSeparator()
+        move_menu = menu.addMenu("移动到（Ctrl+M）")
+        self._mover.populate_menu(move_menu)
+        move_menu.setEnabled(bool(self._selected_items()))
 
         chosen = menu.exec(self._view.viewport().mapToGlobal(position))
         if chosen is None or item is None:
@@ -531,6 +570,52 @@ class MainWindow(QMainWindow):
             QGuiApplication.clipboard().setText(str(item.info.path))
         elif chosen is copy_name_action:
             QGuiApplication.clipboard().setText(item.info.name)
+
+    # ------------------------------------------------------------------ 移动
+
+    def _prepare_move(self) -> bool:
+        if self._scanner.is_running:
+            QMessageBox.information(
+                self, config.APP_NAME, "正在扫描，请等扫描结束或点「停止」后再移动。"
+            )
+            return False
+        self._moving = True
+        # 预览线程开着文件时，Windows 不允许移动它
+        self._clear_hover()
+        self._preview.shutdown(2.0)
+        return True
+
+    def _finish_move(self) -> None:
+        self._moving = False
+
+    def _on_files_moved(self, pairs: List[Tuple[Path, Path]]) -> None:
+        recursive = self._recursive_box.isChecked()
+        in_model = {id(item) for item in self._model.items()}
+        by_path = dict(self._moved_out)
+        by_path.update({mover.path_key(item.info.path): item for item in self._model.items()})
+        changed: List[VideoItem] = []
+        removed: List[VideoItem] = []
+        restored: List[VideoItem] = []
+        for source, target in pairs:
+            item = by_path.get(mover.path_key(source))
+            if item is None:
+                continue
+            self._moved_out.pop(mover.path_key(source), None)
+            item.info.path = target
+            self._cache.store(item.info, item.image)
+            keep = mover.is_under_roots(target, self._roots, recursive)
+            if not keep:
+                self._moved_out[mover.path_key(target)] = item
+            if id(item) in in_model:
+                (changed if keep else removed).append(item)
+            elif keep:
+                restored.append(item)
+        self._model.refresh_items(changed)
+        self._model.remove_items(removed)
+        self._model.add_many(restored)
+        self._rebuild_tree()
+        self._update_status()
+        self._on_selection_changed()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if paths_from_mime(event.mimeData()):
@@ -578,7 +663,8 @@ class MainWindow(QMainWindow):
             config.APP_NAME,
             "<b>{}</b><br><br>"
             "按时长 / 帧率 / 分辨率 / 有无声音给视频分组。鼠标停在缩略图上自动预览，"
-            "选中后按空格用系统播放器播放，双击可在文件夹中定位。<br><br>"
+            "选中后按空格用系统播放器播放，双击可在文件夹中定位；"
+            "多选后可用「移动到」整理到别的文件夹（Ctrl+Z 撤销）。<br><br>"
             "ffprobe：{}<br>ffmpeg：{}<br>静音识别：{}".format(
                 config.APP_NAME,
                 ffprobe_path or "未安装（使用内置解码器）",
