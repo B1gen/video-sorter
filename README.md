@@ -10,7 +10,7 @@
 
 ### 方式一：直接下载 exe（推荐，不需要装 Python）
 
-到 GitHub 仓库的 **Releases** 页面（https://github.com/B1gen/video-sorter/releases/latest）下载：
+到 GitHub 仓库的 **Releases** 页面（https://github.com/B1gen/video-sorter/releases/latest）
 
 * **`VideoSorter.exe`**：单个文件，双击就能用，方便拷到别的电脑（每次启动先解压，慢几秒）；
 * **`VideoSorter-版本号-windows.zip`**：文件夹版，解压后双击里面的 `VideoSorter.exe`，启动更快。
